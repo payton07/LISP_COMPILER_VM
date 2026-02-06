@@ -142,13 +142,229 @@
                 `((RTN))
                 `((LABEL ,(intern (format nil "END_~a" name)))))))))
 
-(defun vm-compile (expr)
+(defun vm-compile (vm expr)
+  (declare (ignore vm))
   (append (compile-expr expr (make-env nil nil) nil)
           '((HALT))))
 
-(defun vm-cle (vm expr)
-  (let ((code (vm-compile expr)))
-    (format t "ASM Généré: ~a~%" code)
-    (vm-load vm code)
-    (vm-run vm)
-    (vm-acc vm)))
+(defun vm-cle (vm-or-name expr)
+  (let ((vm (resolve-vm vm-or-name)))
+    (let ((code (vm-compile vm expr)))
+      (format t "ASM Généré: ~a~%" code)
+      (vm-load vm code)
+      (vm-run vm)
+      (let ((res (vm-acc vm)))
+        (format t "RESULTAT : ~a~%" res)
+        res))));;; -----------------------------------------------------------------------------
+;;; COMPILATEUR EXTENDED (MAX)
+;;; Supporte: setq, while, listes (cons/car/cdr), arrays (aref)
+;;; -----------------------------------------------------------------------------
+
+(defun vm-compile-max (vm expr)
+  (declare (ignore vm))
+  (append '((PUSH (:LIT 0)) (SET-FP)) ;; Fake SavedFP pour aligner le cadre TopLevel
+          (compile-expr-max expr (make-env nil nil) nil)
+          '((HALT))))
+
+(defun vm-cle-max (vm-or-name expr)
+  (let ((vm (resolve-vm vm-or-name)))
+    (let ((code (vm-compile-max vm expr)))
+      (format t "ASM Généré: ~a~%" code)
+      (vm-load vm code)
+      (vm-run vm)
+      (let ((res (vm-acc vm)))
+        (format t "RESULTAT : ~a~%" res)
+        res))))
+
+(defun compile-var (var env code)
+  (let ((locals (car env))
+        (args   (cadr env)))
+    (let ((p-loc (position var locals))
+          (p-arg (position var args)))
+      (cond
+        (p-loc 
+         (append code `((LREF (:LIT ,(- -1 p-loc)))))) ;; Changed to append
+        (p-arg 
+         (let ((offset (+ 2 (- (length args) 1 p-arg))))
+           (append code `((LREF (:LIT ,offset))))))    ;; Changed to append
+        (t 
+         (append code `((LOAD (:LIT ,var)))))))))      ;; Changed to append
+
+(defun compile-expr-max (expr env code)
+  (cond
+    ((null expr) (append code `((LOAD (:LIT nil)))))       ;; Changed to append
+    ((eq expr t) (append code `((LOAD (:LIT t)))))         ;; Changed to append
+    ((numberp expr) (append code `((LOAD (:LIT ,expr)))))  ;; Changed to append
+    ((symbolp expr) (compile-var expr env code))
+    ((atom expr) (append code `((LOAD (:LIT ,expr)))))     ;; Changed to append
+    ((listp expr)
+     (case (car expr)
+       ((quote QUOTE) (append code `((LOAD (:LIT ,(cadr expr)))))) ;; Changed to append
+       ((progn PROGN) (compile-progn-max (cdr expr) env code))
+       ((if IF)    (compile-if-max (cadr expr) (caddr expr) (cadddr expr) env code))
+       ((let LET)   (compile-let-max (cadr expr) (cddr expr) env code))
+       ((defun DEFUN) (compile-defun-max (cadr expr) (caddr expr) (cdddr expr) env code))
+       ((while WHILE) (compile-while (cadr expr) (cddr expr) env code))
+       ((setq SETQ)  (compile-setq (cadr expr) (caddr expr) env code))
+       ((cons CONS)  (compile-cons (cadr expr) (caddr expr) env code))
+       ((car CAR)   (compile-unary 'CAR (cadr expr) env code))
+       ((cdr CDR)   (compile-unary 'CDR (cadr expr) env code))
+       ((rplaca RPLACA) (compile-binary 'RPLACA (cadr expr) (caddr expr) env code)) 
+       ((rplacd RPLACD) (compile-binary 'RPLACD (cadr expr) (caddr expr) env code))
+       ((aref AREF)   (compile-aref (cadr expr) env code)) 
+       ((set-aref SET-AREF) (compile-set-aref (cadr expr) (caddr expr) env code)) 
+       (t      (compile-call-max (car expr) (cdr expr) env code))))))
+
+(defun compile-progn-max (exprs env code)
+  (format t "DEBUG PROGN: ~a~%" exprs)
+  (if (null exprs)
+      code
+      (let ((c (compile-expr-max (car exprs) env code)))
+        (compile-progn-max (cdr exprs) env c))))
+
+(defun compile-if-max (cond-expr then-expr else-expr env code)
+  (let ((l-else (gen-label "ELSE"))
+        (l-end (gen-label "END")))
+    (let* ((c-cond (compile-expr-max cond-expr env nil))
+           (c-then (compile-expr-max then-expr env nil))
+           (c-else (compile-expr-max else-expr env nil)))
+      (append code
+              c-cond
+              `((JNIL ,l-else))
+              c-then
+              `((JMP ,l-end))
+              `((LABEL ,l-else))
+              c-else
+              `((LABEL ,l-end))))))
+
+(defun compile-let-max (bindings body env code)
+  (let ((vars (mapcar #'car bindings))
+        (vals (mapcar #'cadr bindings)))
+    (let ((load-code '()))
+      (dolist (val vals)
+        (setf load-code (append load-code (compile-expr-max val env nil) '((PUSH ACC)))))
+      (let ((new-env (make-env (append vars (car env)) (cadr env))))
+        (let ((body-code (compile-progn-max body new-env nil)))
+          (let ((cleanup (loop repeat (length vars) collect '(POP R1))))
+            (append code load-code body-code cleanup)))))))
+
+(defun compile-defun-max (name args body env code)
+  (let ((l-start (gen-label (string name))))
+    (let ((new-env (make-env nil args)))
+      (let ((body-code (compile-progn-max body new-env nil)))
+        (append code
+                `((JMP ,(intern (format nil "END_~a" name))))
+                `((LABEL ,name))
+                `((SAVE-FP))
+                `((SET-FP))
+                body-code
+                `((RESTORE-FP))
+                `((RTN))
+                `((LABEL ,(intern (format nil "END_~a" name)))))))))
+
+(defun compile-call-max (func args env code)
+  (cond
+    ((member func '(+ - * / < > =))
+     (compile-primitive-max func args env code))
+    ((eq func 'print)
+     (append code 
+             (compile-expr-max (car args) env nil)
+             '((PRINT))))
+    (t 
+     (let ((args-code '()))
+       (dolist (arg args)
+         (setf args-code (append args-code (compile-expr-max arg env nil) '((PUSH ACC)))))
+       (append code
+               args-code
+               `((JSR ,func))
+               (loop repeat (length args) collect '(POP R1)))))))
+
+(defun compile-primitive-max (op args env code)
+  (let ((arg1 (car args))
+        (arg2 (cadr args))
+        (l-true (gen-label "TRUE"))
+        (l-end (gen-label "END")))
+    (append code
+            (compile-expr-max arg1 env nil) 
+            '((PUSH ACC))
+            (compile-expr-max arg2 env nil)
+            '((PUSH ACC))
+            '((POP R1))
+            '((POP ACC))
+            (case op
+              (+ '((ADD R1)))
+              (- '((SUB R1)))
+              (* '((MUL R1)))
+              (/ '((DIV R1)))
+              (< `((CMP ACC R1) (JLT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
+              (> `((CMP ACC R1) (JGT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
+              (= `((CMP ACC R1) (JEQ ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))))))
+
+;; --- Nouvelles Fonctionnalités MAX ---
+
+(defun compile-while (cond body env code)
+  (let ((l-start (gen-label "WHILE_START"))
+        (l-end (gen-label "WHILE_END")))
+    (append code
+            `((LABEL ,l-start))
+            (compile-expr-max cond env nil)
+            `((JNIL ,l-end))
+            (compile-progn-max body env nil)
+            `((JMP ,l-start))
+            `((LABEL ,l-end)))))
+
+(defun compile-setq (var val env code)
+  (let ((locals (car env))
+        (args   (cadr env)))
+    (let ((p-loc (position var locals))
+          (p-arg (position var args)))
+      (append code
+              (compile-expr-max val env nil) ;; Val -> ACC
+              (cond
+                (p-loc 
+                 ;; SREF attend un offset positif ou négatif ? SREF implémenté comme: Mem[FP + offset] = ACC
+                 ;; Variable Locale: index 0 -> FP-1. Offset = -1 - index.
+                 `((SREF (:LIT ,(- -1 p-loc)))))
+                (p-arg 
+                 ;; Argument: index 0 (len 2) -> FP+2. Offset = 2 + len - 1 - index
+                 (let ((offset (+ 2 (- (length args) 1 p-arg))))
+                   `((SREF (:LIT ,offset)))))
+                (t 
+                 ;; Globale
+                 `((STORE ,var))))))))
+
+(defun compile-cons (car-expr cdr-expr env code)
+  (append code
+          (compile-expr-max car-expr env nil) ;; CAR -> ACC
+          '((PUSH ACC))                       ;; Push CAR
+          (compile-expr-max cdr-expr env nil) ;; CDR -> ACC
+          '((CONS))))                         ;; CONS (utilise CDR=ACC et CAR=POP)
+
+(defun compile-unary (op arg env code)
+  (append code
+          (compile-expr-max arg env nil)
+          `((,op))))
+
+(defun compile-binary (op arg1 arg2 env code)
+  (append code
+          (compile-expr-max arg2 env nil) ;; Val (arg2) -> ACC
+          '((PUSH ACC))
+          (compile-expr-max arg1 env nil) ;; Cell (arg1) -> ACC
+          ;; Op attend: Cell dans ACC, Val sur Pile
+          `((,op))))
+
+(defun compile-aref (index-expr env code)
+  ;; (aref index) -> Charge Mem[index]
+  (append code
+          (compile-expr-max index-expr env nil) ;; Index -> ACC
+          '((LDI))))                            ;; LDI: ACC = Mem[ACC]
+
+(defun compile-set-aref (index-expr val-expr env code)
+  ;; (set-aref index val) -> Mem[index] = val
+  (append code
+          (compile-expr-max index-expr env nil) ;; Index -> ACC
+          '((PUSH ACC))                         ;; Push Index
+          (compile-expr-max val-expr env nil)   ;; Val -> ACC
+          '((POP R1))                           ;; R1 = Index
+          '((STI))))                            ;; STI: Mem[R1] = ACC
+

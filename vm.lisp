@@ -1,12 +1,34 @@
-(defstruct vm
+(defun print-vm (v stream depth)
+  (declare (ignore depth))
+  (format stream "#<VM ~a ACC=~a PC=~a SP=~a FP=~a HP=~a CP=~a>" 
+          (vm-name v) (vm-acc v) (vm-pc v) (vm-sp v) (vm-fp v) (vm-hp v) (vm-cp v)))
+
+(defstruct (vm (:print-function print-vm))
+  (name "VM")    ;; Nom de la VM
   (memory (make-array 10000 :initial-element nil)) ;; Mémoire principale (Code + Tas + Pile)
   (acc nil)      ;; Accumulateur principal
   (r1 nil)       ;; Registre secondaire/temporaire
   (pc 0)         ;; Program Counter
   (sp 9999)      ;; Stack Pointer (descendant)
   (fp 9999)      ;; Frame Pointer
+  (hp 0)         ;; Heap Pointer (ascendant, pour les CONS)
+  (cp 0)         ;; Code Pointer (prochain emplacement libre)
   (labels (make-hash-table :test 'equal)) ;; Table des étiquettes pour les sauts
   (running t))   ;; État de la VM
+
+(defvar *vm-registry* (make-hash-table :test 'equal))
+
+(defun resolve-vm (vm-or-name)
+  (cond
+    ((vm-p vm-or-name) vm-or-name)
+    ((gethash vm-or-name *vm-registry*) (gethash vm-or-name *vm-registry*))
+    (t (error "VM non trouvée : ~a" vm-or-name))))
+
+(defun vm-create (&optional (name "VM"))
+  (let ((v (make-vm :name name)))
+    (setf (gethash name *vm-registry*) v)
+    (format t "vm ~a créé avec success.~%" name)
+    v))
 
 ;; -----------------------------------------------------------------------------
 ;; Utils d'Affichage (Couleurs)
@@ -231,37 +253,111 @@
     (LOAD-ENV (op-load-env vm (cadr (car args))))
     (APPLY   (op-apply vm))
     (PRINT   (print (vm-acc vm))) ;; Debug
+    (CONS    (op-cons vm))
+    (CAR     (op-car vm))
+    (CDR     (op-cdr vm))
+    (RPLACA  (op-rplaca vm))
+    (RPLACD  (op-rplacd vm))
+    (LDI     (op-ldi vm))
+    (STI     (op-sti vm))
     (t (vm-error vm (format nil "Instruction inconnue: ~a" op)))))
 
-(defun vm-run (vm)
-  (setf (vm-running vm) t)
-  (loop while (vm-running vm) do
-    (let* ((pc (vm-pc vm))
-           (instr (aref (vm-memory vm) pc)))
-      (if (null instr)
-          (vm-error vm "Segfault (Instruction NIL)")
-          (progn
-            (setf (vm-pc vm) (1+ pc))
-            (vm-exec vm (car instr) (cdr instr)))))))
+;; -----------------------------------------------------------------------------
+;; Primitives de Liste (Heap)
+;; -----------------------------------------------------------------------------
+
+(defun op-ldi (vm)
+  ;; Load Indirect: ACC = Memory[ACC]
+  (let ((addr (vm-acc vm)))
+    (if (and (integerp addr) (>= addr 0) (< addr 10000))
+        (setf (vm-acc vm) (aref (vm-memory vm) addr))
+        (vm-error vm (format nil "LDI: Adresse invalide ~a" addr)))))
+
+(defun op-sti (vm)
+  ;; Store Indirect: Memory[R1] = ACC
+  (let ((addr (vm-r1 vm)))
+    (if (and (integerp addr) (>= addr 0) (< addr 10000))
+        (setf (aref (vm-memory vm) addr) (vm-acc vm))
+        (vm-error vm (format nil "STI: Adresse invalide ~a" addr)))))
+
+(defun op-cons (vm)
+  ;; Stack: [CDR] [CAR] (CAR est au sommet/plus bas index si poussé en dernier)
+  ;; On suppose : PUSH CDR, PUSH CAR. Donc POP -> CAR, POP -> CDR.
+  ;; ACC contient CAR, R1 contient CDR (ou inverse selon compilateur).
+  ;; Convention: ACC=CDR, Pile=CAR.
+  ;; On va simplifier : CONS prend 2 args sur la pile ou 1 sur pile + ACC.
+  ;; Convention compilateur standard : Arg1 (CAR) pushé, Arg2 (CDR) dans ACC.
+  (let ((car-val (vm-pop vm)) ;; On recupere le CAR de la pile
+        (cdr-val (vm-acc vm)) ;; CDR est dans ACC
+        (hp (vm-hp vm)))
+    (if (>= hp (- (vm-sp vm) 100)) ;; Check collision heap/stack
+        (vm-error vm "Out of Memory (Heap/Stack collision)")
+        (progn
+          (setf (aref (vm-memory vm) hp) car-val)
+          (setf (aref (vm-memory vm) (+ hp 1)) cdr-val)
+          (setf (vm-acc vm) hp) ;; Retourne l'adresse du cons (un entier)
+          (setf (vm-hp vm) (+ hp 2))))))
+
+(defun op-car (vm)
+  (let ((addr (vm-acc vm)))
+    (if (numberp addr)
+        (setf (vm-acc vm) (aref (vm-memory vm) addr))
+        (vm-error vm "CAR: ACC n'est pas une adresse"))))
+
+(defun op-cdr (vm)
+  (let ((addr (vm-acc vm)))
+    (if (numberp addr)
+        (setf (vm-acc vm) (aref (vm-memory vm) (+ addr 1)))
+        (vm-error vm "CDR: ACC n'est pas une adresse"))))
+
+(defun op-rplaca (vm)
+  ;; Remplacer CAR : Pile = nouvelle valeur, ACC = adresse cons
+  (let ((val (vm-pop vm))
+        (addr (vm-acc vm)))
+    (if (numberp addr)
+        (setf (aref (vm-memory vm) addr) val)
+        (vm-error vm "RPLACA: Pas une adresse"))))
+
+(defun op-rplacd (vm)
+  ;; Remplacer CDR : Pile = nouvelle valeur, ACC = adresse cons
+  (let ((val (vm-pop vm))
+        (addr (vm-acc vm)))
+    (if (numberp addr)
+        (setf (aref (vm-memory vm) (+ addr 1)) val)
+        (vm-error vm "RPLACD: Pas une adresse"))))
+
+(defun vm-run (vm-or-name)
+  (let ((vm (resolve-vm vm-or-name)))
+    (setf (vm-running vm) t)
+    (loop while (vm-running vm) do
+      (let* ((pc (vm-pc vm))
+             (instr (aref (vm-memory vm) pc)))
+        (if (null instr)
+            (vm-error vm "Segfault (Instruction NIL)")
+            (progn
+              (setf (vm-pc vm) (1+ pc))
+              (vm-exec vm (car instr) (cdr instr))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Chargeur
 ;; -----------------------------------------------------------------------------
 
-(defun vm-load (vm code)
-  ;; Passe 1 : Identifier labels
-  (let ((addr 0))
-    (dolist (instr code)
-      (if (eq (car instr) 'LABEL)
-          (setf (gethash (cadr instr) (vm-labels vm)) addr)
-          (incf addr))))
-  ;; Passe 2 : Charger en mémoire (en sautant les définitions de labels)
-  (let ((addr 0))
-    (dolist (instr code)
-      (unless (eq (car instr) 'LABEL)
-        (setf (aref (vm-memory vm) addr) instr)
-        (incf addr))))
-  (format t "Code chargé (~a instructions).~%" (hash-table-count (vm-labels vm))))
+(defun vm-load (vm-or-name code)
+  (let ((vm (resolve-vm vm-or-name)))
+    ;; Passe 1 : Identifier labels
+    (let ((addr (vm-cp vm)))
+      (dolist (instr code)
+        (if (eq (car instr) 'LABEL)
+            (setf (gethash (cadr instr) (vm-labels vm)) addr)
+            (incf addr))))
+    ;; Passe 2 : Charger en mémoire (en sautant les définitions de labels)
+    (let ((addr (vm-cp vm)))
+      (dolist (instr code)
+        (unless (eq (car instr) 'LABEL)
+          (setf (aref (vm-memory vm) addr) instr)
+          (incf addr)))
+      (setf (vm-cp vm) addr)
+      (format t "Code chargé à la suite. Nouvelle fin (CP): ~a.~%" addr))))
 
 ;; -----------------------------------------------------------------------------
 ;; Bannière de Lancement
@@ -269,22 +365,23 @@
 
 (defun print-banner ()
   (format t "~%")
-  (format t "~a    .____    .____   _____________ __________    ____   ____ _____  ~a~%" +ansi-cyan+ +ansi-reset+)
-  (format t "~a    |    |   |    | /   _____/\______   \   \ /   /  /     \\   \ ~a~%" +ansi-cyan+ +ansi-reset+)
-  (format t "~a    |    |   |    | \_____  \  |     ___/\   Y   /  /  \ /  \\   \~a~%" +ansi-cyan+ +ansi-reset+)
-  (format t "~a    |    |___|    | /        \ |    |     \     /  /    Y    \\   \~a~%" +ansi-cyan+ +ansi-reset+)
-  (format t "~a    |_______ \____|/_______  / |____|      \___/   \____|__  / \___\~a~%" +ansi-cyan+ +ansi-reset+)
+  (format t "~a    .____    .____   _____________ _______ ___    ____   ____ _____      ~a~%" +ansi-cyan+ +ansi-reset+)
+  (format t "~a    |    |   |    | /   _____/\______      \   \ /   /  /     \\   \     ~a~%" +ansi-cyan+ +ansi-reset+)
+  (format t "~a    |    |   |    | \_____  \  |     ___/   \   Y   /  /  \ /  \\   \    ~a~%" +ansi-cyan+ +ansi-reset+)
+  (format t "~a    |    |___|    | /        \ |    |        \     /  /    Y    \\   \   ~a~%" +ansi-cyan+ +ansi-reset+)
+  (format t "~a    |_______ \____|/_______  / |____|         \___/   \____|__  / \___\  ~a~%" +ansi-cyan+ +ansi-reset+)
   (format t "~a            \/             \/                              \/       ~a~%" +ansi-cyan+ +ansi-reset+)
   (format t "~%")
-  (format t "    ~a[ SYSTEM ONLINE ]~a :: ~aVersion 2.0 (Redux)~a~%" +ansi-green+ +ansi-reset+ +ansi-magenta+ +ansi-reset+)
-  (format t "    ~a[ ARCHITECTURE  ]~a :: ~aAccumulator Based VM~a~%" +ansi-green+ +ansi-reset+ +ansi-magenta+ +ansi-reset+)
+  (format t "    ~a[ ARCHITECTURE  ]~a :: ~a Structurelle ~a~%" +ansi-green+ +ansi-reset+ +ansi-magenta+ +ansi-reset+)
   (format t "~%")
-  (format t "    ~aAVAILABLE COMMANDS:~a~%" +ansi-bold+ +ansi-reset+)
-  (format t "    ~a●~a (make-vm)        :: Create a new VM instance~%" +ansi-cyan+ +ansi-reset+)
-  (format t "    ~a●~a (vm-compile exp) :: Compile Lisp expression to ASM~%" +ansi-cyan+ +ansi-reset+)
-  (format t "    ~a●~a (vm-load vm asm) :: Load ASM code into VM~%" +ansi-cyan+ +ansi-reset+)
-  (format t "    ~a●~a (vm-run vm)      :: Execute VM~%" +ansi-cyan+ +ansi-reset+)
-  (format t "    ~a●~a (vm-cle vm exp)  :: Compile, Load, and Execute~%" +ansi-cyan+ +ansi-reset+)
+  (format t "    ~a.   COMMANDS  :~a~%" +ansi-bold+ +ansi-reset+)
+  (format t "    ~a●~a (vm-create name) :: Creer une nouvelle instance de VM~%" +ansi-cyan+ +ansi-reset+)
+  (format t "    ~a●~a (vm-compile vm exp) :: Compile une expression Lisp vers ASM~%" +ansi-cyan+ +ansi-reset+)
+  (format t "    ~a●~a (vm-load vm asm) :: Charge du code ASM dans la VM~%" +ansi-cyan+ +ansi-reset+)
+  (format t "    ~a●~a (vm-run vm)      :: Excecute la  VM~%" +ansi-cyan+ +ansi-reset+)
+  (format t "    ~a●~a (vm-cle vm exp)  :: Compile, Charge, et Execute~%" +ansi-cyan+ +ansi-reset+)
   (format t "~%"))
 
 (print-banner)
+
+(load "compiler.lisp")
