@@ -1,12 +1,12 @@
 (defun print-vm (v stream depth)
   (declare (ignore depth))
-  (format stream "#<VM ~a ACC=~a PC=~a SP=~a FP=~a HP=~a CP=~a>" 
-          (vm-name v) (vm-acc v) (vm-pc v) (vm-sp v) (vm-fp v) (vm-hp v) (vm-cp v)))
+  (format stream "#<VM ~a R0=~a PC=~a SP=~a FP=~a HP=~a CP=~a>" 
+          (vm-name v) (vm-r0 v) (vm-pc v) (vm-sp v) (vm-fp v) (vm-hp v) (vm-cp v)))
 
 (defstruct (vm (:print-function print-vm))
   (name "VM")    ;; Nom de la VM
   (memory (make-array 10000 :initial-element nil)) ;; Mémoire principale (Code + Tas + Pile)
-  (acc nil)      ;; Accumulateur principal
+  (r0 nil)       ;; Registre principal (ex-ACC)
   (r1 nil)       ;; Registre secondaire/temporaire
   (pc 0)         ;; Program Counter
   (sp 9999)      ;; Stack Pointer (descendant)
@@ -67,12 +67,13 @@
 (defun resolve-arg (vm arg)
   "Résout un argument :
    - (:LIT x) -> retourne x
-   - (:REG 'ACC) -> retourne contenu ACC
+   - (:REG 'R0) -> retourne contenu R0
    - (:XXX ...) -> autres modes si nécessaire
    - symbole -> considère comme une étiquette (pour les sauts) ou adresse absolue"
   (cond
     ((and (consp arg) (eq (car arg) :LIT)) (cadr arg))
-    ((eq arg 'ACC) (vm-acc vm))
+    ((eq arg 'R0) (vm-r0 vm))
+    ((eq arg 'ACC) (vm-r0 vm)) ;; Compatibilité ascendante temporaire
     ((eq arg 'R1) (vm-r1 vm))
     ((numberp arg) arg) ;; Adresse directe ou valeur immédiate selon contexte
     (t arg)))
@@ -81,42 +82,43 @@
 ;; Instructions (Jeu d'instructions adapté Accumulateur)
 ;; -----------------------------------------------------------------------------
 
-;; LOAD <src> : Charge src dans ACC
+;; LOAD <src> : Charge src dans R0
 (defun op-load (vm src)
-  (setf (vm-acc vm) (resolve-arg vm src)))
+  (setf (vm-r0 vm) (resolve-arg vm src)))
 
-;; STORE <dest> : Stocke ACC dans dest (Mémoire ou Registre)
+;; STORE <dest> : Stocke R0 dans dest (Mémoire ou Registre)
 ;; Si dest est un index (entier), on écrit en mémoire.
 ;; Si dest est (:FP relative), on écrit relatif au Frame Pointer.
 (defun op-store (vm dest)
   (cond
-    ((numberp dest) (setf (aref (vm-memory vm) dest) (vm-acc vm)))
-    ((eq dest 'R1) (setf (vm-r1 vm) (vm-acc vm)))
+    ((numberp dest) (setf (aref (vm-memory vm) dest) (vm-r0 vm)))
+    ((eq dest 'R1) (setf (vm-r1 vm) (vm-r0 vm)))
     ((and (consp dest) (eq (car dest) :FP)) ;; Stockage relatif au FP (ex: (:FP -2))
      (let ((addr (+ (vm-fp vm) (cadr dest))))
-       (setf (aref (vm-memory vm) addr) (vm-acc vm))))
+       (setf (aref (vm-memory vm) addr) (vm-r0 vm))))
     (t (vm-error vm (format nil "Destination invalide pour STORE: ~a" dest)))))
 
 ;; MOVE <src> <dest> (Legacy support, peut-être utile)
 (defun op-move (vm src dest)
   (let ((val (resolve-arg vm src)))
     (cond
-      ((eq dest 'ACC) (setf (vm-acc vm) val))
+      ((eq dest 'R0) (setf (vm-r0 vm) val))
+      ((eq dest 'ACC) (setf (vm-r0 vm) val)) ;; Compat
       ((eq dest 'R1)  (setf (vm-r1 vm) val))
-      (t (vm-error vm "MOVE supporte seulement ACC ou R1 en dest")))))
+      (t (vm-error vm "MOVE supporte seulement R0 ou R1 en dest")))))
 
-;; Opérations Arithmétiques (Résultat dans ACC)
-(defun op-add (vm src) (setf (vm-acc vm) (+ (vm-acc vm) (resolve-arg vm src))))
-(defun op-sub (vm src) (setf (vm-acc vm) (- (vm-acc vm) (resolve-arg vm src))))
-(defun op-mul (vm src) (setf (vm-acc vm) (* (vm-acc vm) (resolve-arg vm src))))
-(defun op-div (vm src) (setf (vm-acc vm) (/ (vm-acc vm) (resolve-arg vm src))))
+;; Opérations Arithmétiques (Résultat dans R0)
+(defun op-add (vm src) (setf (vm-r0 vm) (+ (vm-r0 vm) (resolve-arg vm src))))
+(defun op-sub (vm src) (setf (vm-r0 vm) (- (vm-r0 vm) (resolve-arg vm src))))
+(defun op-mul (vm src) (setf (vm-r0 vm) (* (vm-r0 vm) (resolve-arg vm src))))
+(defun op-div (vm src) (setf (vm-r0 vm) (/ (vm-r0 vm) (resolve-arg vm src))))
 
 ;; Comparaison
-;; CMP <a1> <a2> -> Met ACC à T, EQ, LT, GT ou NIL
+;; CMP <a1> <a2> -> Met R0 à T, EQ, LT, GT ou NIL
 (defun op-cmp (vm src1 src2)
   (let ((v1 (resolve-arg vm src1))
         (v2 (resolve-arg vm src2)))
-    (setf (vm-acc vm) (cond ((= v1 v2) 'EQ)
+    (setf (vm-r0 vm) (cond ((= v1 v2) 'EQ)
                             ((< v1 v2) 'LT)
                             ((> v1 v2) 'GT)
                             (t nil)))))
@@ -130,19 +132,20 @@
 
 (defun op-jmp (vm label) (jump-to vm label))
 
-(defun op-jeq (vm label) (when (eq (vm-acc vm) 'EQ) (jump-to vm label)))
-(defun op-jlt (vm label) (when (eq (vm-acc vm) 'LT) (jump-to vm label)))
-(defun op-jgt (vm label) (when (eq (vm-acc vm) 'GT) (jump-to vm label)))
-;; Sauts génériques sur booléens (si ACC != nil)
-(defun op-jtrue (vm label) (when (vm-acc vm) (jump-to vm label)))
-(defun op-jnil (vm label)  (unless (vm-acc vm) (jump-to vm label)))
+(defun op-jeq (vm label) (when (eq (vm-r0 vm) 'EQ) (jump-to vm label)))
+(defun op-jlt (vm label) (when (eq (vm-r0 vm) 'LT) (jump-to vm label)))
+(defun op-jgt (vm label) (when (eq (vm-r0 vm) 'GT) (jump-to vm label)))
+;; Sauts génériques sur booléens (si R0 != nil)
+(defun op-jtrue (vm label) (when (vm-r0 vm) (jump-to vm label)))
+(defun op-jnil (vm label)  (unless (vm-r0 vm) (jump-to vm label)))
 
 ;; Pile
 (defun op-push (vm src) (vm-push vm (resolve-arg vm src)))
 (defun op-pop (vm dest)
   (let ((val (vm-pop vm)))
     (cond
-      ((eq dest 'ACC) (setf (vm-acc vm) val))
+      ((eq dest 'R0) (setf (vm-r0 vm) val))
+      ((eq dest 'ACC) (setf (vm-r0 vm) val)) ;; Compat
       ((eq dest 'R1) (setf (vm-r1 vm) val))
       (t nil)))) ;; POP simple sans destination (discard)
 
@@ -167,7 +170,7 @@
 (defun op-restore-fp (vm) (setf (vm-fp vm) (vm-pop vm)))
 
 ;; Instruction spéciale pour lire depuis la pile relative à FP
-;; LREF <offset> -> ACC = Stack[FP - offset]
+;; LREF <offset> -> R0 = Stack[FP - offset]
 ;; offset positif car stack descend : FP est en haut, les args sont au dessus, les vars locales en dessous.
 ;; Convention :
 ;;   ...
@@ -177,12 +180,12 @@
 ;;   LOCALS   (FP - 1 ...)
 (defun op-lref (vm offset)
   (let ((addr (+ (vm-fp vm) offset)))
-    (setf (vm-acc vm) (aref (vm-memory vm) addr))))
+    (setf (vm-r0 vm) (aref (vm-memory vm) addr))))
 
-;; SREF <offset> : Stack[FP + offset] = ACC
+;; SREF <offset> : Stack[FP + offset] = R0
 (defun op-sref (vm offset)
   (let ((addr (+ (vm-fp vm) offset)))
-    (setf (aref (vm-memory vm) addr) (vm-acc vm))))
+    (setf (aref (vm-memory vm) addr) (vm-r0 vm))))
 
 ;; Fermetures
 ;; MAKE-CLOSURE <label> <env-size>
@@ -193,20 +196,20 @@
     ;; Pour simplifier : on pop N valeurs de la pile pour remplir l'env
     (loop for i from 0 below n-env do
        (setf (aref env i) (vm-pop vm)))
-    (setf (vm-acc vm) (vector 'CLOSURE label env))))
+    (setf (vm-r0 vm) (vector 'CLOSURE label env))))
 
 ;; LOAD-ENV <index> : Charge la i-ème variable de l'environnement (stocké dans R1)
 (defun op-load-env (vm index)
   (let ((env (vm-r1 vm)))
     (if (arrayp env)
-        (setf (vm-acc vm) (aref env index))
+        (setf (vm-r0 vm) (aref env index))
         (vm-error vm "LOAD-ENV: R1 ne contient pas d'environnement valide"))))
 
 ;; CALL-CLOSURE <n-args>
-;; La fermeture est dans ACC (ou sur la pile ? Disons dans ACC pour simplifier le dispatch).
+;; La fermeture est dans R0 (ou sur la pile ? Disons dans R0 pour simplifier le dispatch).
 ;; Les arguments sont sur la pile.
 (defun op-apply (vm)
-  (let ((closure (vm-acc vm)))
+  (let ((closure (vm-r0 vm)))
     (if (and (vectorp closure) (eq (aref closure 0) 'CLOSURE))
         (let ((label (aref closure 1))
               (env (aref closure 2)))
@@ -252,7 +255,7 @@
     (MAKE-CLOSURE (op-make-closure vm (car args) (cadr args)))
     (LOAD-ENV (op-load-env vm (cadr (car args))))
     (APPLY   (op-apply vm))
-    (PRINT   (print (vm-acc vm))) ;; Debug
+    (PRINT   (print (vm-r0 vm))) ;; Debug
     (CONS    (op-cons vm))
     (CAR     (op-car vm))
     (CDR     (op-cdr vm))
@@ -267,61 +270,61 @@
 ;; -----------------------------------------------------------------------------
 
 (defun op-ldi (vm)
-  ;; Load Indirect: ACC = Memory[ACC]
-  (let ((addr (vm-acc vm)))
+  ;; Load Indirect: R0 = Memory[R0]
+  (let ((addr (vm-r0 vm)))
     (if (and (integerp addr) (>= addr 0) (< addr 10000))
-        (setf (vm-acc vm) (aref (vm-memory vm) addr))
+        (setf (vm-r0 vm) (aref (vm-memory vm) addr))
         (vm-error vm (format nil "LDI: Adresse invalide ~a" addr)))))
 
 (defun op-sti (vm)
-  ;; Store Indirect: Memory[R1] = ACC
+  ;; Store Indirect: Memory[R1] = R0
   (let ((addr (vm-r1 vm)))
     (if (and (integerp addr) (>= addr 0) (< addr 10000))
-        (setf (aref (vm-memory vm) addr) (vm-acc vm))
+        (setf (aref (vm-memory vm) addr) (vm-r0 vm))
         (vm-error vm (format nil "STI: Adresse invalide ~a" addr)))))
 
 (defun op-cons (vm)
   ;; Stack: [CDR] [CAR] (CAR est au sommet/plus bas index si poussé en dernier)
   ;; On suppose : PUSH CDR, PUSH CAR. Donc POP -> CAR, POP -> CDR.
-  ;; ACC contient CAR, R1 contient CDR (ou inverse selon compilateur).
-  ;; Convention: ACC=CDR, Pile=CAR.
-  ;; On va simplifier : CONS prend 2 args sur la pile ou 1 sur pile + ACC.
-  ;; Convention compilateur standard : Arg1 (CAR) pushé, Arg2 (CDR) dans ACC.
+  ;; R0 contient CAR, R1 contient CDR (ou inverse selon compilateur).
+  ;; Convention: R0=CDR, Pile=CAR.
+  ;; On va simplifier : CONS prend 2 args sur la pile ou 1 sur pile + R0.
+  ;; Convention compilateur standard : Arg1 (CAR) pushé, Arg2 (CDR) dans R0.
   (let ((car-val (vm-pop vm)) ;; On recupere le CAR de la pile
-        (cdr-val (vm-acc vm)) ;; CDR est dans ACC
+        (cdr-val (vm-r0 vm)) ;; CDR est dans R0
         (hp (vm-hp vm)))
     (if (>= hp (- (vm-sp vm) 100)) ;; Check collision heap/stack
         (vm-error vm "Out of Memory (Heap/Stack collision)")
         (progn
           (setf (aref (vm-memory vm) hp) car-val)
           (setf (aref (vm-memory vm) (+ hp 1)) cdr-val)
-          (setf (vm-acc vm) hp) ;; Retourne l'adresse du cons (un entier)
+          (setf (vm-r0 vm) hp) ;; Retourne l'adresse du cons (un entier)
           (setf (vm-hp vm) (+ hp 2))))))
 
 (defun op-car (vm)
-  (let ((addr (vm-acc vm)))
+  (let ((addr (vm-r0 vm)))
     (if (numberp addr)
-        (setf (vm-acc vm) (aref (vm-memory vm) addr))
-        (vm-error vm "CAR: ACC n'est pas une adresse"))))
+        (setf (vm-r0 vm) (aref (vm-memory vm) addr))
+        (vm-error vm "CAR: R0 n'est pas une adresse"))))
 
 (defun op-cdr (vm)
-  (let ((addr (vm-acc vm)))
+  (let ((addr (vm-r0 vm)))
     (if (numberp addr)
-        (setf (vm-acc vm) (aref (vm-memory vm) (+ addr 1)))
-        (vm-error vm "CDR: ACC n'est pas une adresse"))))
+        (setf (vm-r0 vm) (aref (vm-memory vm) (+ addr 1)))
+        (vm-error vm "CDR: R0 n'est pas une adresse"))))
 
 (defun op-rplaca (vm)
-  ;; Remplacer CAR : Pile = nouvelle valeur, ACC = adresse cons
+  ;; Remplacer CAR : Pile = nouvelle valeur, R0 = adresse cons
   (let ((val (vm-pop vm))
-        (addr (vm-acc vm)))
+        (addr (vm-r0 vm)))
     (if (numberp addr)
         (setf (aref (vm-memory vm) addr) val)
         (vm-error vm "RPLACA: Pas une adresse"))))
 
 (defun op-rplacd (vm)
-  ;; Remplacer CDR : Pile = nouvelle valeur, ACC = adresse cons
+  ;; Remplacer CDR : Pile = nouvelle valeur, R0 = adresse cons
   (let ((val (vm-pop vm))
-        (addr (vm-acc vm)))
+        (addr (vm-r0 vm)))
     (if (numberp addr)
         (setf (aref (vm-memory vm) (+ addr 1)) val)
         (vm-error vm "RPLACD: Pas une adresse"))))

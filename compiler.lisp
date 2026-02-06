@@ -80,7 +80,7 @@
         (vals (mapcar #'cadr bindings)))
     (let ((load-code '()))
       (dolist (val vals)
-        (setf load-code (append load-code (compile-expr val env nil) '((PUSH ACC)))))
+        (setf load-code (append load-code (compile-expr val env nil) '((PUSH R0)))))
       ;; Etendre l'environnement local (prepend vars)
       (let ((new-env (make-env (append vars (car env)) (cadr env))))
         (let ((body-code (compile-progn body new-env nil)))
@@ -100,7 +100,7 @@
      ;; Appel de fonction standard
      (let ((args-code '()))
        (dolist (arg args)
-         (setf args-code (append args-code (compile-expr arg env nil) '((PUSH ACC)))))
+         (setf args-code (append args-code (compile-expr arg env nil) '((PUSH R0)))))
        (append code
                args-code
                `((JSR ,func))
@@ -112,20 +112,20 @@
         (l-true (gen-label "TRUE"))
         (l-end (gen-label "END")))
     (append code
-            (compile-expr arg1 env nil) ;; Arg1 -> ACC
-            '((PUSH ACC))
-            (compile-expr arg2 env nil) ;; Arg2 -> ACC
-            '((PUSH ACC))
+            (compile-expr arg1 env nil) ;; Arg1 -> R0
+            '((PUSH R0))
+            (compile-expr arg2 env nil) ;; Arg2 -> R0
+            '((PUSH R0))
             '((POP R1))  ;; R1 = Arg2
-            '((POP ACC)) ;; ACC = Arg1
+            '((POP R0)) ;; R0 = Arg1
             (case op
               (+ '((ADD R1)))
               (- '((SUB R1)))
               (* '((MUL R1)))
               (/ '((DIV R1)))
-              (< `((CMP ACC R1) (JLT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
-              (> `((CMP ACC R1) (JGT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
-              (= `((CMP ACC R1) (JEQ ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))))))
+              (< `((CMP R0 R1) (JLT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
+              (> `((CMP R0 R1) (JGT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
+              (= `((CMP R0 R1) (JEQ ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))))))
 
 (defun compile-defun (name args body env code)
   (let ((l-start (gen-label (string name))))
@@ -148,32 +148,63 @@
           '((HALT))))
 
 (defun vm-cle (vm-or-name expr)
+
   (let ((vm (resolve-vm vm-or-name)))
+
     (let ((code (vm-compile vm expr)))
+
       (format t "ASM Généré: ~a~%" code)
+
       (vm-load vm code)
+
       (vm-run vm)
-      (let ((res (vm-acc vm)))
+
+      (let ((res (vm-r0 vm)))
+
         (format t "RESULTAT : ~a~%" res)
-        res))));;; -----------------------------------------------------------------------------
-;;; COMPILATEUR EXTENDED (MAX)
-;;; Supporte: setq, while, listes (cons/car/cdr), arrays (aref)
+
+        res))))
+
+
+
 ;;; -----------------------------------------------------------------------------
 
+;;; COMPILATEUR EXTENDED (MAX)
+
+;;; Supporte: setq, while, listes (cons/car/cdr), arrays (aref)
+
+;;; -----------------------------------------------------------------------------
+
+
+
 (defun vm-compile-max (vm expr)
+
   (declare (ignore vm))
+
   (append '((PUSH (:LIT 0)) (SET-FP)) ;; Fake SavedFP pour aligner le cadre TopLevel
+
           (compile-expr-max expr (make-env nil nil) nil)
+
           '((HALT))))
 
+
+
 (defun vm-cle-max (vm-or-name expr)
+
   (let ((vm (resolve-vm vm-or-name)))
+
     (let ((code (vm-compile-max vm expr)))
+
       (format t "ASM Généré: ~a~%" code)
+
       (vm-load vm code)
+
       (vm-run vm)
-      (let ((res (vm-acc vm)))
+
+      (let ((res (vm-r0 vm)))
+
         (format t "RESULTAT : ~a~%" res)
+
         res))))
 
 (defun compile-var (var env code)
@@ -241,7 +272,7 @@
         (vals (mapcar #'cadr bindings)))
     (let ((load-code '()))
       (dolist (val vals)
-        (setf load-code (append load-code (compile-expr-max val env nil) '((PUSH ACC)))))
+        (setf load-code (append load-code (compile-expr-max val env nil) '((PUSH R0)))))
       (let ((new-env (make-env (append vars (car env)) (cadr env))))
         (let ((body-code (compile-progn-max body new-env nil)))
           (let ((cleanup (loop repeat (length vars) collect '(POP R1))))
@@ -272,7 +303,7 @@
     (t 
      (let ((args-code '()))
        (dolist (arg args)
-         (setf args-code (append args-code (compile-expr-max arg env nil) '((PUSH ACC)))))
+         (setf args-code (append args-code (compile-expr-max arg env nil) '((PUSH R0)))))
        (append code
                args-code
                `((JSR ,func))
@@ -285,19 +316,19 @@
         (l-end (gen-label "END")))
     (append code
             (compile-expr-max arg1 env nil) 
-            '((PUSH ACC))
+            '((PUSH R0))
             (compile-expr-max arg2 env nil)
-            '((PUSH ACC))
+            '((PUSH R0))
             '((POP R1))
-            '((POP ACC))
+            '((POP R0))
             (case op
               (+ '((ADD R1)))
               (- '((SUB R1)))
               (* '((MUL R1)))
               (/ '((DIV R1)))
-              (< `((CMP ACC R1) (JLT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
-              (> `((CMP ACC R1) (JGT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
-              (= `((CMP ACC R1) (JEQ ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))))))
+              (< `((CMP R0 R1) (JLT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
+              (> `((CMP R0 R1) (JGT ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))
+              (= `((CMP R0 R1) (JEQ ,l-true) (LOAD (:LIT nil)) (JMP ,l-end) (LABEL ,l-true) (LOAD (:LIT t)) (LABEL ,l-end)))))))
 
 ;; --- Nouvelles Fonctionnalités MAX ---
 
@@ -318,10 +349,10 @@
     (let ((p-loc (position var locals))
           (p-arg (position var args)))
       (append code
-              (compile-expr-max val env nil) ;; Val -> ACC
+              (compile-expr-max val env nil) ;; Val -> R0
               (cond
                 (p-loc 
-                 ;; SREF attend un offset positif ou négatif ? SREF implémenté comme: Mem[FP + offset] = ACC
+                 ;; SREF attend un offset positif ou négatif ? SREF implémenté comme: Mem[FP + offset] = R0
                  ;; Variable Locale: index 0 -> FP-1. Offset = -1 - index.
                  `((SREF (:LIT ,(- -1 p-loc)))))
                 (p-arg 
@@ -334,10 +365,10 @@
 
 (defun compile-cons (car-expr cdr-expr env code)
   (append code
-          (compile-expr-max car-expr env nil) ;; CAR -> ACC
-          '((PUSH ACC))                       ;; Push CAR
-          (compile-expr-max cdr-expr env nil) ;; CDR -> ACC
-          '((CONS))))                         ;; CONS (utilise CDR=ACC et CAR=POP)
+          (compile-expr-max car-expr env nil) ;; CAR -> R0
+          '((PUSH R0))                       ;; Push CAR
+          (compile-expr-max cdr-expr env nil) ;; CDR -> R0
+          '((CONS))))                         ;; CONS (utilise CDR=R0 et CAR=POP)
 
 (defun compile-unary (op arg env code)
   (append code
@@ -346,24 +377,24 @@
 
 (defun compile-binary (op arg1 arg2 env code)
   (append code
-          (compile-expr-max arg2 env nil) ;; Val (arg2) -> ACC
-          '((PUSH ACC))
-          (compile-expr-max arg1 env nil) ;; Cell (arg1) -> ACC
-          ;; Op attend: Cell dans ACC, Val sur Pile
+          (compile-expr-max arg2 env nil) ;; Val (arg2) -> R0
+          '((PUSH R0))
+          (compile-expr-max arg1 env nil) ;; Cell (arg1) -> R0
+          ;; Op attend: Cell dans R0, Val sur Pile
           `((,op))))
 
 (defun compile-aref (index-expr env code)
   ;; (aref index) -> Charge Mem[index]
   (append code
-          (compile-expr-max index-expr env nil) ;; Index -> ACC
-          '((LDI))))                            ;; LDI: ACC = Mem[ACC]
+          (compile-expr-max index-expr env nil) ;; Index -> R0
+          '((LDI))))                            ;; LDI: R0 = Mem[R0]
 
 (defun compile-set-aref (index-expr val-expr env code)
   ;; (set-aref index val) -> Mem[index] = val
   (append code
-          (compile-expr-max index-expr env nil) ;; Index -> ACC
-          '((PUSH ACC))                         ;; Push Index
-          (compile-expr-max val-expr env nil)   ;; Val -> ACC
+          (compile-expr-max index-expr env nil) ;; Index -> R0
+          '((PUSH R0))                         ;; Push Index
+          (compile-expr-max val-expr env nil)   ;; Val -> R0
           '((POP R1))                           ;; R1 = Index
-          '((STI))))                            ;; STI: Mem[R1] = ACC
+          '((STI))))                            ;; STI: Mem[R1] = R0
 

@@ -12,7 +12,7 @@ Le cœur du projet est la structure `vm`. Voici pourquoi elle est définie ainsi
 (defstruct vm
   (name "VM")      ;; Identifiant convivial
   (memory ...)     ;; Architecture unifiée (Von Neumann)
-  (acc nil)        ;; Registre de travail
+  (r0 nil)         ;; Registre de travail (ex-ACC)
   (r1 nil)         ;; Registre temporaire
   (pc 0)           ;; Séquenceur
   (sp 9999)        ;; Gestion de pile
@@ -27,8 +27,8 @@ Le cœur du projet est la structure `vm`. Voici pourquoi elle est définie ainsi
 1.  **Mémoire Unifiée (Array 10000)** : J'ai choisi une architecture **Von Neumann** simulée où le code et les données partagent le même espace d'adressage linéaire.
     *   **Avantage** : Simplicité d'implémentation (un seul tableau).
     *   **Flexibilité** : La frontière entre le Tas (Heap, qui monte) et la Pile (Stack, qui descend) est dynamique. On utilise l'espace au maximum.
-2.  **Architecture à Accumulateur (ACC)** :
-    *   **Pourquoi ?** C'est le modèle le plus simple pour un compilateur. Au lieu de gérer l'allocation de registres (complexe), on assume que **chaque opération** prend son entrée dans ACC et met son résultat dans ACC.
+2.  **Architecture à Accumulateur (R0)** :
+    *   **Pourquoi ?** C'est le modèle le plus simple pour un compilateur. Au lieu de gérer l'allocation de registres (complexe), on assume que **chaque opération** prend son entrée dans R0 et met son résultat dans R0.
     *   **R1 (Registre Auxiliaire)** : Sert uniquement à stocker temporairement le 2ème opérande d'une opération binaire (ex: `ADD`) pendant qu'on manipule la pile.
 3.  **Hash-Table pour les Labels** :
     *   Au lieu de résoudre les adresses de saut en "2 passes" pures lors de la compilation, la VM garde une table de symboles (`labels`). Cela permet un "linkage" dynamique : `vm-load` peut résoudre un saut vers `FIB` même si `FIB` a été chargé bien avant.
@@ -40,17 +40,17 @@ Le compilateur (`compiler.lisp`) est un traducteur **S-Expression -> ASM**.
 
 ### La Stratégie de Compilation
 Il parcourt l'arbre syntaxique Lisp (AST) récursivement.
-*   **Invariant** : "Le code généré pour une expression laisse TOUJOURS le résultat de cette expression dans `ACC`."
+*   **Invariant** : "Le code généré pour une expression laisse TOUJOURS le résultat de cette expression dans `R0`."
 
 ### Exemple de traduction : `(+ A B)`
 C'est une opération binaire. Le schéma est toujours le même :
-1.  **Compiler A** -> `ACC = A`.
-2.  **`PUSH ACC`** -> Sauvegarde A sur la pile (car on a besoin de ACC pour calculer B).
-3.  **Compiler B** -> `ACC = B`.
-4.  **`PUSH ACC`** -> Sauvegarde B sur la pile.
+1.  **Compiler A** -> `R0 = A`.
+2.  **`PUSH R0`** -> Sauvegarde A sur la pile (car on a besoin de R0 pour calculer B).
+3.  **Compiler B** -> `R0 = B`.
+4.  **`PUSH R0`** -> Sauvegarde B sur la pile.
 5.  **`POP R1`** -> Récupère B dans R1.
-6.  **`POP ACC`** -> Récupère A dans ACC.
-7.  **`ADD R1`** -> `ACC = ACC + R1`.
+6.  **`POP R0`** -> Récupère A dans R0.
+7.  **`ADD R1`** -> `R0 = R0 + R1`.
 
 *Pourquoi PUSH/POP ?* Pour garantir que le calcul de B n'écrase pas le résultat de A, même si B est une expression très complexe (ex: un autre appel de fonction).
 
@@ -72,34 +72,68 @@ C'est l'étape de "Linkage" et de "Loading".
 
 ---
 
-## 4. 🏃 L'Exécution (`vm-run`) : Le Cycle Fetch-Decode-Execute
-C'est une boucle `while (running)`.
+## 4. 🏃 L'Exécution (`vm-run`) : Au cœur de la machine
 
-1.  **Fetch** : `instr = memory[PC]`. On récupère l'instruction courante.
-2.  **Increment** : `PC = PC + 1`.
-3.  **Execute** : On dispatch selon le type d'instruction (ex: `ADD` appelle `op-add`).
+C'est ici que le code prend vie. La VM exécute une boucle infinie (tant que `running` est vrai) :
+1.  **Fetch** : Récupère l'instruction à l'adresse `PC`.
+2.  **Decode & Execute** : Exécute l'action correspondante (ADD, PUSH, JMP...).
+3.  **Update** : Met à jour `PC` (sauf si saut).
 
-### Zoom sur la Pile et les Registres (Runtime)
-C'est là que la magie opère, surtout pour les fonctions.
+### 🔍 Zoom sur la dynamique des registres (SP, FP, CP)
 
-**Scénario : Appel de fonction `(fib 10)`**
+C'est la partie la plus critique à comprendre. Visualisons l'état de la machine lors d'un appel de fonction `(fib 10)`.
 
-1.  **Avant l'appel (Caller)** :
-    *   On empile l'argument `10`. `SP` descend.
-    *   `JSR FIB` : Empile l'adresse de retour (PC actuel). `SP` descend. Saute à `FIB`.
+**État Initial :**
+*   **CP (Code Pointer)** : Pointe à la fin du code chargé (ex: 50). Le code est statique en bas de la mémoire (0..49).
+*   **SP (Stack Pointer)** : Pointe tout en haut de la mémoire (9999). La pile est vide.
+*   **FP (Frame Pointer)** : Pointe aussi en haut (9999). Aucun contexte de fonction actif.
 
-2.  **Entrée dans la fonction (Callee - Prologue)** :
-    *   `SAVE-FP` : On empile l'ancien `FP`. C'est le lien dynamique vers le contexte de l'appelant.
-    *   `SET-FP` : `FP = SP + 1`. Maintenant, `FP` pointe sur l'ancien FP sauvegardé. C'est notre nouveau point de repère stable.
-    *   *La pile ressemble à : [Args] [RetAddr] [OldFP] <- FP*
+#### Étape 1 : Préparation de l'appel (Caller)
+On veut appeler `fib(10)`.
+1.  `LOAD 10` -> `R0 = 10`.
+2.  `PUSH R0` -> On empile l'argument.
+    *   `SP` passe de 9999 à **9998**.
+    *   `Mem[9999] = 10`.
 
-3.  **Corps de la fonction** :
-    *   Les variables locales (`LET`) sont empilées sous FP.
-    *   On y accède via `LREF -1`, `LREF -2`...
+#### Étape 2 : Saut vers la fonction (JSR)
+L'instruction `JSR FIB` est exécutée.
+1.  Empile l'adresse de retour (PC actuel + 1, disons 105).
+    *   `SP` passe de 9998 à **9997**.
+    *   `Mem[9998] = 105`.
+2.  `PC` saute à l'adresse de `FIB` (disons 10).
 
-4.  **Sortie (Epilogue)** :
-    *   `RESTORE-FP` : `FP = Pop()`. On remet `FP` à sa valeur d'avant l'appel. On restaure le contexte de l'appelant.
-    *   `RTN` : `PC = Pop()`. On dépile l'adresse de retour et on y saute.
+#### Étape 3 : Prologue de la fonction (Callee)
+C'est ici que `FP` entre en jeu pour créer un "cadre" stable.
+1.  `SAVE-FP` : Sauvegarde l'ancien FP (9999) sur la pile.
+    *   `SP` passe de 9997 à **9996**.
+    *   `Mem[9997] = 9999`.
+2.  `SET-FP` : Définit le nouveau FP.
+    *   `FP = SP + 1` = **9997**.
+    *   Maintenant, `FP` pointe sur l'endroit où on a sauvé l'ancien FP.
+
+**📸 État de la Pile à cet instant :**
+
+| Adresse | Contenu | Description | Registres |
+| :--- | :--- | :--- | :--- |
+| 9999 | 10 | Argument n (Arg 0) | |
+| 9998 | 105 | Adresse de Retour (PC) | |
+| 9997 | 9999 | Ancien FP (Saved FP) | **<- FP (Actuel)** |
+| 9996 | ... | (Espace libre pour variables locales) | **<- SP (Sommet)** |
+
+**Pourquoi c'est génial ?**
+*   Pour accéder à l'argument `n` : C'est toujours `FP + 2` (9997 + 2 = 9999).
+*   Pour accéder à une variable locale : Ce sera `FP - 1`, `FP - 2`...
+*   Peu importe combien de `PUSH` on fait ensuite pour des calculs intermédiaires (`SP` va descendre à 9990, 9980...), **`FP` reste fixe à 9997**. C'est notre phare dans la tempête.
+
+#### Étape 4 : Épilogue et Retour
+Quand la fonction a fini (résultat dans `R0`) :
+1.  `RESTORE-FP` : `FP = POP()`.
+    *   On lit la valeur en 9997 (qui est 9999). `FP` redevient 9999.
+    *   `SP` remonte à 9997.
+2.  `RTN` : `PC = POP()`.
+    *   On lit la valeur en 9998 (qui est 105). `PC` redevient 105.
+    *   `SP` remonte à 9998.
+3.  On est revenu chez l'appelant ! Il ne reste plus qu'à dépiler l'argument (`POP R1` pour nettoyer) et `SP` revient à 9999.
 
 ---
 
