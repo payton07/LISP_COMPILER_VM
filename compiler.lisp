@@ -216,7 +216,6 @@
        (t      (compile-call-max (car expr) (cdr expr) env code))))))
 
 (defun compile-progn-max (exprs env code)
-  (format t "DEBUG PROGN: ~a~%" exprs)
   (if (null exprs)
       code
       (let ((c (compile-expr-max (car exprs) env code)))
