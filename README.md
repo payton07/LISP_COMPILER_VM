@@ -55,6 +55,13 @@ clisp test_Fibo_6.lisp
 clisp test_Fibo_Persistence.lisp
 clisp test_Max.lisp
 ```
+### Exemple éxecution
+Execution de factorielle 20 :
+```bash
+(vm-create 'FACT)
+(vm-cle 'FACT '(defun fact (n) (if (< n 2) 1 (* n (fact (- n 1))))))
+(vm-cle 'FACT '(fact 20))
+```
 
 ## 📚 Documentation
 Pour une explication détaillée de l'architecture et du fonctionnement interne (Registres, Pile, Cycle d'exécution), consultez le [Guide de Présentation](PRESENTATION_GUIDE.md).
