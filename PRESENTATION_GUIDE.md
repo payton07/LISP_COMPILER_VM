@@ -186,14 +186,3 @@ Ouvre ton terminal et lance `clisp`.
 **Résultat :** `30`.
 
 ---
-
-## 7. ❓ Questions Pièges
-
-**Q: Pourquoi `LREF -1` et pas juste `POP` pour lire une variable ?**
-R: Parce qu'on peut avoir besoin de lire une variable plusieurs fois ! `POP` détruit la donnée de la pile. `LREF` (Local Reference) lit la donnée à un offset fixe sans modifier le pointeur de pile. C'est de l'accès aléatoire, pas séquentiel.
-
-**Q: Que se passe-t-il si j'appelle une fonction récursive infinie ?**
-R: La pile va grandir vers le bas (`SP--`) jusqu'à rencontrer le tas (`HP`) ou atteindre 0. La VM détectera un "Stack Overflow".
-
-**Q: Comment ton compilateur gère l'ordre d'évaluation ?**
-R: Strictement de gauche à droite. Pour `(+ A B)`, je compile A, je le push, je compile B, je le push. C'est standard et sûr.
